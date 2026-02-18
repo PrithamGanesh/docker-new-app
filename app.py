@@ -1,13 +1,16 @@
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from collections import defaultdict, deque
 
-from flask import Flask, request
+from flask import Flask, jsonify, make_response, request
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_CONTENT_LENGTH_BYTES", 1_048_576))
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -20,9 +23,30 @@ SUSPICIOUS_PATTERNS = [
     re.compile(r"(?i)(/etc/passwd|cmd\.exe|powershell)"),
 ]
 
-REQUEST_WINDOW_SECONDS = 60
-SUSPICIOUS_REQUEST_THRESHOLD = 120
-ip_request_times = defaultdict(deque)
+REQUEST_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", 60))
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", 30))
+RATE_LIMIT_BASE_BLOCK_SECONDS = int(os.getenv("RATE_LIMIT_BASE_BLOCK_SECONDS", 30))
+RATE_LIMIT_MAX_BLOCK_SECONDS = int(os.getenv("RATE_LIMIT_MAX_BLOCK_SECONDS", 300))
+MAX_QUERY_PARAMS = int(os.getenv("MAX_QUERY_PARAMS", 20))
+MAX_QUERY_KEY_LENGTH = int(os.getenv("MAX_QUERY_KEY_LENGTH", 64))
+MAX_QUERY_VALUE_LENGTH = int(os.getenv("MAX_QUERY_VALUE_LENGTH", 512))
+ALLOWED_QUERY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+ALLOWED_CORS_ORIGINS = {
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_CORS_ORIGINS", "http://localhost:5000,http://127.0.0.1:5000"
+    ).split(",")
+    if origin.strip()
+}
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+rate_limit_state = defaultdict(
+    lambda: {
+        "times": deque(),
+        "blocked_until": 0.0,
+        "violations": 0,
+    }
+)
 MAX_ALERTS_IN_MEMORY = 200
 MONITORED_LOG_FILES = ("requests.log", "errors.log", "suspicious.log")
 recent_alerts = deque(maxlen=MAX_ALERTS_IN_MEMORY)
@@ -32,7 +56,7 @@ monitor_started = False
 ALERT_PATTERNS = [
     ("critical", "unhandled_exception", re.compile(r"Unhandled error", re.IGNORECASE)),
     ("high", "signature_match", re.compile(r"Pattern match", re.IGNORECASE)),
-    ("medium", "traffic_spike", re.compile(r"High request rate", re.IGNORECASE)),
+    ("medium", "traffic_spike", re.compile(r"(High request rate|rate limiter)", re.IGNORECASE)),
     ("high", "attack_keywords", re.compile(r"union\s+select|<script|\.{2}/|/etc/passwd|cmd\.exe", re.IGNORECASE)),
 ]
 
@@ -119,20 +143,148 @@ def start_log_monitoring() -> None:
         monitor_started = True
 
 
-@app.before_request
-def log_request_and_detect_suspicious_behavior():
-    start_log_monitoring()
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    ua = request.headers.get("User-Agent", "-")
-    request_logger.info("%s %s | ip=%s | ua=%s", request.method, request.path, ip, ua)
+def client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
 
-    full_payload = " ".join(
+
+def validate_query_params() -> tuple[bool, str]:
+    if len(request.args) > MAX_QUERY_PARAMS:
+        return False, f"Too many query parameters; max={MAX_QUERY_PARAMS}"
+
+    for key, values in request.args.lists():
+        if len(key) > MAX_QUERY_KEY_LENGTH:
+            return (
+                False,
+                f"Query key too long for '{key[:20]}'; max={MAX_QUERY_KEY_LENGTH}",
+            )
+        if not ALLOWED_QUERY_KEY_PATTERN.match(key):
+            return False, f"Invalid query key '{key}'"
+        for value in values:
+            if len(value) > MAX_QUERY_VALUE_LENGTH:
+                return (
+                    False,
+                    f"Query value too long for key '{key}'; max={MAX_QUERY_VALUE_LENGTH}",
+                )
+    return True, ""
+
+
+def enforce_rate_limit(ip: str) -> tuple[bool, int]:
+    state = rate_limit_state[ip]
+    now = time.time()
+
+    if now < state["blocked_until"]:
+        retry_after = int(state["blocked_until"] - now) + 1
+        return False, retry_after
+
+    times = state["times"]
+    times.append(now)
+    while times and (now - times[0]) > REQUEST_WINDOW_SECONDS:
+        times.popleft()
+
+    if len(times) > RATE_LIMIT_REQUESTS:
+        state["violations"] += 1
+        block_seconds = min(
+            RATE_LIMIT_BASE_BLOCK_SECONDS * (2 ** (state["violations"] - 1)),
+            RATE_LIMIT_MAX_BLOCK_SECONDS,
+        )
+        state["blocked_until"] = now + block_seconds
+        state["times"].clear()
+        return False, int(block_seconds)
+
+    return True, 0
+
+
+def validate_csrf(ip: str) -> tuple[bool, str]:
+    if request.method not in UNSAFE_METHODS:
+        return True, ""
+
+    cookie_token = request.cookies.get("csrf_token", "")
+    header_token = request.headers.get("X-CSRF-Token", "")
+
+    if not cookie_token or not header_token or cookie_token != header_token:
+        suspicious_logger.warning(
+            "CSRF validation failed | ip=%s | method=%s | path=%s",
+            ip,
+            request.method,
+            request.path,
+        )
+        return False, "CSRF token missing or invalid"
+
+    return True, ""
+
+
+def request_payload_for_detection() -> str:
+    body_text = ""
+    if request.method in UNSAFE_METHODS:
+        body_text = request.get_data(cache=True, as_text=True) or ""
+
+    return " ".join(
         [
             request.path or "",
             request.query_string.decode("utf-8", errors="ignore"),
-            request.get_data(cache=True, as_text=True) or "",
+            body_text,
         ]
     )
+
+
+@app.before_request
+def security_and_logging_hooks():
+    start_log_monitoring()
+    ip = client_ip()
+    ua = request.headers.get("User-Agent", "-")
+    request_logger.info("%s %s | ip=%s | ua=%s", request.method, request.path, ip, ua)
+
+    content_length = request.content_length
+    if content_length and content_length > app.config["MAX_CONTENT_LENGTH"]:
+        suspicious_logger.warning(
+            "Request body too large | ip=%s | method=%s | path=%s | bytes=%d",
+            ip,
+            request.method,
+            request.path,
+            content_length,
+        )
+        return {"error": "request body too large"}, 413
+
+    valid_query, reason = validate_query_params()
+    if not valid_query:
+        suspicious_logger.warning(
+            "Query validation failed | ip=%s | method=%s | path=%s | reason=%s",
+            ip,
+            request.method,
+            request.path,
+            reason,
+        )
+        return {"error": "invalid query parameters", "reason": reason}, 400
+
+    allowed_request, retry_after = enforce_rate_limit(ip)
+    if not allowed_request:
+        suspicious_logger.warning(
+            "Request blocked by rate limiter | ip=%s | method=%s | path=%s | retry_after=%ds",
+            ip,
+            request.method,
+            request.path,
+            retry_after,
+        )
+        response = make_response(
+            jsonify(
+                {
+                    "error": "rate limit exceeded",
+                    "retry_after_seconds": retry_after,
+                }
+            ),
+            429,
+        )
+        response.headers["Retry-After"] = str(retry_after)
+        return response
+
+    valid_csrf, csrf_reason = validate_csrf(ip)
+    if not valid_csrf:
+        return {"error": csrf_reason}, 403
+
+    full_payload = request_payload_for_detection()
 
     matched = [
         pattern.pattern for pattern in SUSPICIOUS_PATTERNS if pattern.search(full_payload)
@@ -146,19 +298,75 @@ def log_request_and_detect_suspicious_behavior():
             ",".join(matched),
         )
 
-    now = time.time()
-    times = ip_request_times[ip]
-    times.append(now)
-    while times and (now - times[0]) > REQUEST_WINDOW_SECONDS:
-        times.popleft()
 
-    if len(times) > SUSPICIOUS_REQUEST_THRESHOLD:
-        suspicious_logger.warning(
-            "High request rate | ip=%s | count=%d | window=%ds",
-            ip,
-            len(times),
-            REQUEST_WINDOW_SECONDS,
+@app.after_request
+def add_security_headers(response):
+    origin = request.headers.get("Origin", "")
+    if origin and origin in ALLOWED_CORS_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type,X-CSRF-Token"
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+
+    if not request.cookies.get("csrf_token"):
+        response.set_cookie(
+            "csrf_token",
+            secrets.token_urlsafe(32),
+            httponly=False,
+            secure=bool(os.getenv("CSRF_COOKIE_SECURE", "0") == "1"),
+            samesite="Lax",
+            max_age=86400,
         )
+    return response
+
+
+@app.route("/csrf-token", methods=["GET"])
+def csrf_token():
+    token = request.cookies.get("csrf_token") or secrets.token_urlsafe(32)
+    response = jsonify({"csrf_token": token})
+    response.set_cookie(
+        "csrf_token",
+        token,
+        httponly=False,
+        secure=bool(os.getenv("CSRF_COOKIE_SECURE", "0") == "1"),
+        samesite="Lax",
+        max_age=86400,
+    )
+    return response
+
+
+@app.route("/alerts", methods=["GET", "OPTIONS"])
+@app.route("/health", methods=["GET", "OPTIONS"])
+@app.route("/", methods=["GET", "OPTIONS"])
+def options_support():
+    if request.method == "OPTIONS":
+        return "", 204
+    if request.path == "/":
+        visitor_ip = client_ip()
+        return f"Hello! Your IP {visitor_ip} has been logged."
+    if request.path == "/health":
+        return {"status": "ok"}, 200
+    return {"count": len(recent_alerts), "alerts": list(recent_alerts)}, 200
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_entity_too_large(error):
+    suspicious_logger.warning(
+        "Request rejected by MAX_CONTENT_LENGTH | ip=%s | path=%s",
+        client_ip(),
+        request.path,
+    )
+    return {"error": "request body too large"}, 413
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(error):
+    return {"error": error.name, "message": error.description}, error.code
 
 
 @app.errorhandler(Exception)
@@ -167,29 +375,10 @@ def log_unhandled_error(error):
         "Unhandled error | method=%s | path=%s | ip=%s | error=%s",
         request.method,
         request.path,
-        request.headers.get("X-Forwarded-For", request.remote_addr),
+        client_ip(),
         str(error),
     )
     return {"error": "internal server error"}, 500
-
-
-@app.route("/")
-def home():
-    visitor_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    return f"Hello! Your IP {visitor_ip} has been logged."
-
-
-@app.route("/health")
-def health():
-    return {"status": "ok"}, 200
-
-
-@app.route("/alerts")
-def alerts():
-    return {
-        "count": len(recent_alerts),
-        "alerts": list(recent_alerts),
-    }, 200
 
 
 if __name__ == "__main__":

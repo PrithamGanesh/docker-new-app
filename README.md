@@ -1,227 +1,191 @@
 # Python Docker Demo
 
-Flask-based security-aware web app with:
-- request logging
-- error logging
-- suspicious behavior logging
+Security-aware Flask app with:
+- request/error/suspicious logging
 - continuous log monitoring
-- pattern-based alert generation
+- pattern-based alerting
+- CORS and CSRF protections
+- active rate limiting with temporary blocking
+- input size and query validation
 
-## 1. Architecture
+## 1. Architecture Diagram
 ```text
-                   +------------------------+
-                   |      Client/User       |
-                   +-----------+------------+
-                               |
-                               v
-                   +------------------------+
-                   |      Flask App         |
-                   |  (app.py, port 5000)   |
-                   +-----------+------------+
-                               |
-         +---------------------+----------------------+
-         |                     |                      |
-         v                     v                      v
- +---------------+   +----------------+   +--------------------+
- | Request Hook  |   | Error Handler  |   | Monitor Thread     |
- | before_request|   | Exception Catch |   | continuous tailing |
- +-------+-------+   +--------+-------+   +---------+----------+
-         |                    |                     |
-         v                    v                     v
- +---------------+    +---------------+    +-------------------+
- | requests.log  |    |  errors.log   |    | pattern detection |
- +-------+-------+    +-------+-------+    +---------+---------+
-         |                    |                     |
-         +--------------------+----------+----------+
-                                     |
-                                     v
-                            +-----------------+
-                            | suspicious.log  |
-                            +--------+--------+
-                                     |
-                                     v
-                            +-----------------+
-                            |  alerts.log     |
-                            | + /alerts API   |
-                            +-----------------+
+                 +----------------------+
+                 |      Client/API      |
+                 +----------+-----------+
+                            |
+                            v
+                 +----------------------+
+                 |      Nginx TLS       |
+                 |  (prod: 443/HTTPS)   |
+                 +----------+-----------+
+                            |
+                            v
+                 +----------------------+
+                 |      Flask App       |
+                 |       app.py         |
+                 +----------+-----------+
+                            |
+      +---------------------+---------------------+
+      |                     |                     |
+      v                     v                     v
++-------------+     +---------------+     +------------------+
+| before_req  |     | error handlers|     | monitor thread   |
+| - CORS/CSRF |     | - HTTP/500    |     | reads log lines  |
+| - size/args |     +-------+-------+     +--------+---------+
+| - rate limit|             |                      |
++------+------+             v                      v
+       |            +---------------+      +------------------+
+       +----------->| logs/*.log     |----->| alert patterns   |
+                    | req/err/susp   |      | + alerts.log     |
+                    +---------------+      +------------------+
 ```
 
 ## 2. Tech Stack
-- Language: Python 3.9
-- Framework: Flask
-- Containerization: Docker, Docker Compose
-- Logging: Python built-in `logging`
-- Pattern Matching: Python `re` module
-- Concurrency: Python `threading` (daemon monitor thread)
+- Python 3.9
+- Flask
+- Docker + Docker Compose
+- Nginx (production TLS reverse proxy)
+- Python `logging`, `threading`, `re`, `secrets`
 
-## 3. Project Structure
-```text
-docker-new-app/
-├─ app.py
-├─ requirements.txt
-├─ Dockerfile
-├─ docker-compose.yaml
-├─ README.md
-├─ logs/                    # created at runtime
-│  ├─ requests.log
-│  ├─ errors.log
-│  ├─ suspicious.log
-│  └─ alerts.log
-├─ templates/
-└─ static/
-```
+## 3. Key Security Controls
+### CORS
+- Only whitelisted origins are allowed via `ALLOWED_CORS_ORIGINS`.
+- Dynamic `Access-Control-Allow-Origin` only for approved origins.
 
-## 4. Features
-### Request Logging
-- Every incoming HTTP request is logged to `logs/requests.log`.
-- Captured fields: method, path, IP, user agent.
+### CSRF
+- Double-submit CSRF token pattern.
+- Token stored in `csrf_token` cookie and must match `X-CSRF-Token` header for `POST/PUT/PATCH/DELETE`.
+- Token endpoint: `GET /csrf-token`.
 
-### Error Logging
-- Unhandled exceptions are captured globally and logged with traceback in `logs/errors.log`.
-- API response on unhandled error: HTTP `500` with `{"error":"internal server error"}`.
+### Rate Limiting and Blocking
+- Per-IP sliding window limiter.
+- Defaults:
+  - `30` requests / `60` seconds
+  - temporary block starts at `30s`
+  - exponential backoff up to `300s`
+- Blocked requests return `429` with `Retry-After`.
 
-### Suspicious Behavior Logging
-- Request payload and path are checked for suspicious signatures.
-- High request rate per IP is tracked in a sliding window.
-- Events are written to `logs/suspicious.log`.
+### Input Validation
+- Max request body size via Flask `MAX_CONTENT_LENGTH` (default `1MB`).
+- Query parameter validation:
+  - max params: `20`
+  - key length: `64`
+  - value length: `512`
+  - allowed key charset: `[A-Za-z0-9_.-]`
 
-### Continuous Monitoring and Alerts
-- A background daemon continuously reads new lines from:
-  - `logs/requests.log`
-  - `logs/errors.log`
-  - `logs/suspicious.log`
-- Pattern matches trigger generated alerts in `logs/alerts.log`.
-- Recent alerts are also stored in memory and returned by `GET /alerts`.
+### Security Headers
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: same-origin`
+- HSTS at Nginx in production TLS config.
+
+## 4. Logging and Alerts
+Runtime logs are created under `logs/`:
+- `requests.log`
+- `errors.log`
+- `suspicious.log`
+- `alerts.log`
+
+Background monitoring continuously tails request/error/suspicious logs, detects patterns, and generates alerts.
 
 ## 5. API Endpoints
-### `GET /`
-- Returns: greeting and visitor IP info.
-
-### `GET /health`
-- Returns: `{"status":"ok"}` with HTTP `200`.
-
-### `GET /alerts`
-- Returns recent generated alerts.
-- Example response:
-```json
-{
-  "count": 2,
-  "alerts": [
-    {
-      "timestamp": "2026-02-18 20:10:00",
-      "source_file": "suspicious.log",
-      "severity": "high",
-      "pattern": "signature_match",
-      "line": "Pattern match | ip=127.0.0.1 | method=GET | ..."
-    }
-  ]
-}
-```
+- `GET /` health-style demo response
+- `GET /health` returns `{"status":"ok"}`
+- `GET /alerts` returns in-memory recent alerts
+- `GET /csrf-token` returns/sets CSRF token
 
 ## 6. How to Execute
-### Option A: Run with Docker
-1. Build image:
-```bash
-docker build -t python-docker-demo .
-```
-2. Run container:
-```bash
-docker run -p 5000:5000 python-docker-demo
-```
-3. Open:
-- `http://localhost:5000/`
-- `http://localhost:5000/health`
-- `http://localhost:5000/alerts`
-
-### Option B: Run with Docker Compose
-1. Start:
-```bash
-docker compose up --build
-```
-2. Open:
-- `http://localhost:5000/`
-- `http://localhost:5000/health`
-- `http://localhost:5000/alerts`
-
-### Option C: Run Locally (without Docker)
-1. Create and activate virtual environment (optional but recommended).
-2. Install dependencies:
+### Option A: Local Python
+1. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
-3. Start app:
+2. Run:
 ```bash
 python app.py
 ```
-4. Open:
+3. Open:
 - `http://127.0.0.1:5000/`
 
-## 7. Logging and Alert Rules
-### Suspicious Request Patterns
-- Path traversal: `../`
-- SQL-like injection fragments: `union select`, `or 1=1`, `drop table`
-- Script injection fragment: `<script`
-- Sensitive probing strings: `/etc/passwd`, `cmd.exe`, `powershell`
-
-### Traffic Spike Rule
-- If a single IP exceeds `120` requests in `60` seconds, a suspicious event is logged.
-
-### Alert Pattern Sources
-- Unhandled exceptions from `errors.log`
-- Suspicious signature matches from `suspicious.log`
-- High request-rate markers from `suspicious.log`
-- Attack-keyword matches from monitored lines
-
-## 8. Observability Quick Commands
-### Linux/macOS
+### Option B: Docker
+1. Build:
 ```bash
-tail -f logs/requests.log
-tail -f logs/errors.log
-tail -f logs/suspicious.log
-tail -f logs/alerts.log
+docker build -t python-docker-demo .
+```
+2. Run:
+```bash
+docker run -p 5000:5000 python-docker-demo
 ```
 
-### Windows PowerShell
-```powershell
-Get-Content .\logs\requests.log -Wait
-Get-Content .\logs\errors.log -Wait
-Get-Content .\logs\suspicious.log -Wait
-Get-Content .\logs\alerts.log -Wait
+### Option C: Docker Compose (dev)
+```bash
+docker compose up --build
 ```
 
-## 9. FAQ
+### Option D: Docker Compose (prod with TLS via Nginx)
+1. Place cert files:
+- `certs/fullchain.pem`
+- `certs/privkey.pem`
+2. Start:
+```bash
+docker compose -f docker-compose.prod.yml up --build
+```
+3. Open:
+- `https://localhost/`
+
+## 7. Environment Variables
+- `ALLOWED_CORS_ORIGINS` (comma-separated origins)
+- `CSRF_COOKIE_SECURE` (`1` in HTTPS production)
+- `MAX_CONTENT_LENGTH_BYTES` (default `1048576`)
+- `RATE_LIMIT_REQUESTS` (default `30`)
+- `RATE_LIMIT_WINDOW_SECONDS` (default `60`)
+- `RATE_LIMIT_BASE_BLOCK_SECONDS` (default `30`)
+- `RATE_LIMIT_MAX_BLOCK_SECONDS` (default `300`)
+- `MAX_QUERY_PARAMS` (default `20`)
+- `MAX_QUERY_KEY_LENGTH` (default `64`)
+- `MAX_QUERY_VALUE_LENGTH` (default `512`)
+
+## 8. FAQs
+### Why am I getting `403 CSRF token missing or invalid`?
+- For unsafe methods, include cookie `csrf_token` and matching `X-CSRF-Token` header.
+- Fetch token first from `GET /csrf-token`.
+
+### Why am I getting `429 rate limit exceeded`?
+- Your IP exceeded the configured request threshold.
+- Respect `Retry-After` and reduce request rate.
+
+### Why can browser calls fail due to CORS?
+- Origin is not in `ALLOWED_CORS_ORIGINS`.
+- Add the exact origin (scheme + host + port) to the env var.
+
 ### Why is `/alerts` empty?
-- Alerts are only created when monitored log lines match alert patterns.
-- Generate some traffic or suspicious input first.
+- Alerts appear only after matching suspicious/error patterns.
 
-### Why are there no files under `logs/` yet?
-- Log files are created at runtime when requests or events occur.
+## 9. Troubleshooting
+### Large upload rejected
+- Expected if body is over `MAX_CONTENT_LENGTH_BYTES`.
+- Increase env var only if needed.
 
-### Can this replace a full SIEM or IDS?
-- No. This project provides a lightweight in-app detection/alert layer, not a full security platform.
+### HTTPS compose fails to start Nginx
+- Check cert files exist at:
+  - `certs/fullchain.pem`
+  - `certs/privkey.pem`
 
-### Does this block malicious requests?
-- No. It currently logs and alerts. Blocking can be added later via middleware/firewall/rate-limiter.
+### App reachable directly on 5000 but not through HTTPS
+- Verify Nginx container is running and ports `80/443` are mapped.
 
-### Is alert state persistent?
-- `alerts.log` is persistent on disk.
-- `/alerts` in-memory list resets when the process restarts.
-
-## 10. Troubleshooting
-### Port 5000 already in use
-- Change mapping in docker run/compose or free the port.
-
-### Container starts but app is inaccessible
-- Confirm container is running and port mapping is correct (`5000:5000`).
-
-### No suspicious alerts seen
-- Use a test query such as:
-```bash
-curl "http://localhost:5000/?q=union%20select"
+## 10. Project Structure
+```text
+docker-new-app/
+|- app.py
+|- Dockerfile
+|- docker-compose.yaml
+|- docker-compose.prod.yml
+|- nginx/
+|  |- nginx.conf
+|- certs/                  # provide TLS certs here
+|- logs/                   # runtime-created log files
+|- requirements.txt
+|- README.md
 ```
-
-## 11. Future Enhancements
-- Alert deduplication and cooldown windows
-- Log rotation and retention policy
-- Email/Slack/Webhook integrations for alerts
-- Metrics endpoint and dashboard integration

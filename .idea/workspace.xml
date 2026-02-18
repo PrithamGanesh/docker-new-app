@@ -4,8 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="08a37729-673c-4334-a593-1621796f87d2" name="Changes" comment="Added logging methods">
+    <list default="true" id="08a37729-673c-4334-a593-1621796f87d2" name="Changes" comment="Added alerts and provided clear documentation">
+      <change afterPath="$PROJECT_DIR$/docker-compose.prod.yml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/nginx/nginx.conf" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app.py" beforeDir="false" afterPath="$PROJECT_DIR$/app.py" afterDir="false" />
     </list>
@@ -108,7 +111,7 @@
       <option name="presentableId" value="Default" />
       <updated>1771343236326</updated>
       <workItem from="1771343237702" duration="3327000" />
-      <workItem from="1771424223820" duration="2711000" />
+      <workItem from="1771424223820" duration="5578000" />
     </task>
     <task id="LOCAL-00001" summary="Initial Commit">
       <option name="closed" value="true" />
@@ -134,7 +137,15 @@
       <option name="project" value="LOCAL" />
       <updated>1771425208559</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="Added alerts and provided clear documentation">
+      <option name="closed" value="true" />
+      <created>1771428381808</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1771428381808</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -144,6 +155,7 @@
     <MESSAGE value="Initial Commit" />
     <MESSAGE value="Added access logs and health endpoint" />
     <MESSAGE value="Added logging methods" />
-    <option name="LAST_COMMIT_MESSAGE" value="Added logging methods" />
+    <MESSAGE value="Added alerts and provided clear documentation" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added alerts and provided clear documentation" />
   </component>
 </project>
