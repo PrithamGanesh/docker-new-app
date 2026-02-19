@@ -15,7 +15,7 @@ app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_CONTENT_LENGTH_BYTES", 1_0
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Basic scanner/attack signatures for lightweight suspicious-activity detection.
+# Fast signatures for suspicious traffic. Tune over time.
 SUSPICIOUS_PATTERNS = [
     re.compile(r"\.\./"),
     re.compile(r"(?i)(union\s+select|select\s+\*|drop\s+table|or\s+1=1)"),
@@ -40,7 +40,7 @@ ALLOWED_CORS_ORIGINS = {
 }
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-rate_limit_state = defaultdict(
+ip_buckets = defaultdict(
     lambda: {
         "times": deque(),
         "blocked_until": 0.0,
@@ -49,11 +49,11 @@ rate_limit_state = defaultdict(
 )
 MAX_ALERTS_IN_MEMORY = 200
 MONITORED_LOG_FILES = ("requests.log", "errors.log", "suspicious.log")
-recent_alerts = deque(maxlen=MAX_ALERTS_IN_MEMORY)
-monitor_state_lock = threading.Lock()
-monitor_started = False
+hot_alert_buffer = deque(maxlen=MAX_ALERTS_IN_MEMORY)
+log_tail_guard = threading.Lock()
+is_tailer_live = False
 
-ALERT_PATTERNS = [
+alert_rules = [
     ("critical", "unhandled_exception", re.compile(r"Unhandled error", re.IGNORECASE)),
     ("high", "signature_match", re.compile(r"Pattern match", re.IGNORECASE)),
     ("medium", "traffic_spike", re.compile(r"(High request rate|rate limiter)", re.IGNORECASE)),
@@ -93,7 +93,7 @@ def create_alert(source_file: str, severity: str, pattern_name: str, line: str) 
         "pattern": pattern_name,
         "line": line.strip(),
     }
-    recent_alerts.append(alert)
+    hot_alert_buffer.append(alert)
     alert_logger.warning(
         "severity=%s | pattern=%s | source=%s | line=%s",
         severity,
@@ -104,7 +104,7 @@ def create_alert(source_file: str, severity: str, pattern_name: str, line: str) 
 
 
 def detect_patterns(source_file: str, line: str) -> None:
-    for severity, name, pattern in ALERT_PATTERNS:
+    for severity, name, pattern in alert_rules:
         if pattern.search(line):
             create_alert(source_file, severity, name, line)
 
@@ -134,13 +134,13 @@ def monitor_logs_forever(poll_interval: float = 1.0) -> None:
 
 
 def start_log_monitoring() -> None:
-    global monitor_started
-    with monitor_state_lock:
-        if monitor_started:
+    global is_tailer_live
+    with log_tail_guard:
+        if is_tailer_live:
             return
         thread = threading.Thread(target=monitor_logs_forever, daemon=True)
         thread.start()
-        monitor_started = True
+        is_tailer_live = True
 
 
 def client_ip() -> str:
@@ -172,7 +172,7 @@ def validate_query_params() -> tuple[bool, str]:
 
 
 def enforce_rate_limit(ip: str) -> tuple[bool, int]:
-    state = rate_limit_state[ip]
+    state = ip_buckets[ip]
     now = time.time()
 
     if now < state["blocked_until"]:
@@ -351,7 +351,53 @@ def options_support():
         return f"Hello! Your IP {visitor_ip} has been logged."
     if request.path == "/health":
         return {"status": "ok"}, 200
-    return {"count": len(recent_alerts), "alerts": list(recent_alerts)}, 200
+    return {"count": len(hot_alert_buffer), "alerts": list(hot_alert_buffer)}, 200
+
+
+@app.route("/ai-insights", methods=["GET"])
+def ai_insights():
+    # Quick heuristic score, meant for operators and demos.
+    sev_weights = {"critical": 10, "high": 6, "medium": 3, "low": 1}
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    weighted_alert_score = 0
+
+    for alert in hot_alert_buffer:
+        sev = alert.get("severity", "low")
+        if sev not in severity_counts:
+            severity_counts["low"] += 1
+            weighted_alert_score += sev_weights["low"]
+            continue
+        severity_counts[sev] += 1
+        weighted_alert_score += sev_weights[sev]
+
+    blocked_ips = 0
+    bursty_ips = 0
+    now = time.time()
+    for state in ip_buckets.values():
+        if now < state["blocked_until"]:
+            blocked_ips += 1
+        if state["violations"] > 0:
+            bursty_ips += 1
+
+    risk_score = min(100, weighted_alert_score + blocked_ips * 12 + bursty_ips * 4)
+    if risk_score >= 70:
+        risk_level = "high"
+    elif risk_score >= 35:
+        risk_level = "medium"
+    else:
+        risk_level = "low"
+
+    return {
+        "mode": "heuristic-ai-assist",
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "signals": {
+            "recent_alerts": len(hot_alert_buffer),
+            "severity_breakdown": severity_counts,
+            "currently_blocked_ips": blocked_ips,
+            "ips_with_recent_violations": bursty_ips,
+        },
+    }, 200
 
 
 @app.errorhandler(RequestEntityTooLarge)
