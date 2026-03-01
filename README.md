@@ -59,6 +59,9 @@ Use this section to showcase your running app and security insights. Suggested a
 - `/ai-insights` response screenshot
 - Logs output (`logs/suspicious.log`) screenshot
 
+Current demo screenshot:
+![RiskEngine demo](docs/images/riskengine-demo.png)
+
 If you add media files, place them in a `docs/images/` folder and reference them here:
 ```md
 ![Home endpoint](docs/images/home.png)
