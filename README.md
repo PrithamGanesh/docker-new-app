@@ -1,6 +1,9 @@
 # RiskEngine: AI-Assisted Security Monitor
 
 [![AI Powered](https://img.shields.io/badge/AI%20Powered-Heuristic%20Risk%20Engine-0A7B5C)](#project-description)
+[![GitHub forks](https://img.shields.io/github/forks/PrithamGanesh/docker-new-app)](https://github.com/PrithamGanesh/docker-new-app/network)
+[![GitHub Repo stars](https://img.shields.io/github/stars/PrithamGanesh/docker-new-app)](https://github.com/PrithamGanesh/docker-new-app/stargazers)
+[![GitHub watchers](https://img.shields.io/github/watchers/PrithamGanesh/docker-new-app)](https://github.com/PrithamGanesh/docker-new-app/watchers)
 
 ## Project Description
 This project is a Flask-based web security monitor that runs locally or in Docker. It inspects incoming traffic, applies baseline protection checks, and produces an interpretable risk summary for operations teams.
@@ -58,9 +61,6 @@ Use this section to showcase your running app and security insights. Suggested a
 - Home/API response screenshot
 - `/ai-insights` response screenshot
 - Logs output (`logs/suspicious.log`) screenshot
-
-Current demo screenshot:
-![RiskEngine demo](docs/images/riskengine-demo.png)
 
 If you add media files, place them in a `docs/images/` folder and reference them here:
 ```md
