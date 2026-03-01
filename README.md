@@ -1,4 +1,4 @@
-# Python Docker Demo: AI-Assisted Security Monitor
+# RiskEngine: AI-Assisted Security Monitor
 
 [![AI Powered](https://img.shields.io/badge/AI%20Powered-Heuristic%20Risk%20Engine-0A7B5C)](#project-description)
 
@@ -28,8 +28,8 @@ Application URL: `http://localhost:5000`
 
 ### Option 2: Run with Docker
 ```bash
-docker build -t python-docker-demo .
-docker run -p 5000:5000 python-docker-demo
+docker build -t riskengine .
+docker run -p 5000:5000 riskengine
 ```
 
 ### Option 3: Run with Docker Compose (development)
@@ -127,7 +127,7 @@ Recommended issue template details:
 
 ## Project Structure
 ```text
-docker-new-app/
+RiskEngine/
 |- app.py
 |- Dockerfile
 |- docker-compose.yaml

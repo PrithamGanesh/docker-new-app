@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/docker-new-app.iml" filepath="$PROJECT_DIR$/.idea/docker-new-app.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/RiskEngine.iml" filepath="$PROJECT_DIR$/.idea/RiskEngine.iml" />
     </modules>
   </component>
 </project>
